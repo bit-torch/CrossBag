@@ -157,34 +157,29 @@ impl SyncEngine {
         local: &HashMap<PathBuf, FileEntry>,
         remote: &HashMap<PathBuf, FileEntry>,
     ) -> (Vec<FileEntry>, Vec<FileEntry>) {
-        let mut local_only = Vec::new();
-        let mut remote_only = Vec::new();
+        let mut local_only: Vec<FileEntry> = Vec::new();
+        let mut remote_only: Vec<FileEntry> = Vec::new();
 
-        // 找出本地有但远程没有的文件
-        let remote_rel_paths: HashSet<&str> =
-            remote.values().map(|e| e.relative_path.as_str()).collect();
-
-        let _local_rel_map: HashMap<&str, &FileEntry> = local
+        // 构建远程 relative_path → FileEntry 的 HashMap，O(1) 查找
+        let remote_map: HashMap<&str, &FileEntry> = remote
             .values()
             .map(|e| (e.relative_path.as_str(), e))
             .collect();
 
-        // 本地有、远程没有的
+        let local_rel_set: HashSet<&str> =
+            local.values().map(|e| e.relative_path.as_str()).collect();
+
+        // 本地有、远程没有 / 双方都有但内容不同
         for entry in local.values() {
-            match remote_rel_paths.get(entry.relative_path.as_str()) {
-                Some(_) => {
-                    // 双方都有, 比较哈希
-                    if let Some(remote_entry) = remote
-                        .values()
-                        .find(|e| e.relative_path == entry.relative_path)
-                    {
-                        if !entry.is_same_as(remote_entry) {
-                            // 文件内容不同，以修改时间较新的为准
-                            if entry.modified > remote_entry.modified {
-                                local_only.push(entry.clone());
-                            } else {
-                                remote_only.push(remote_entry.clone());
-                            }
+            match remote_map.get(entry.relative_path.as_str()) {
+                Some(remote_entry) => {
+                    // 双方都有，比较哈希
+                    if !entry.is_same_as(remote_entry) {
+                        // 文件内容不同，以修改时间较新的为准
+                        if entry.modified > remote_entry.modified {
+                            local_only.push(entry.clone());
+                        } else {
+                            remote_only.push((*remote_entry).clone());
                         }
                     }
                 }
@@ -196,9 +191,6 @@ impl SyncEngine {
         }
 
         // 远程有、本地没有的
-        let local_rel_set: HashSet<&str> =
-            local.values().map(|e| e.relative_path.as_str()).collect();
-
         for entry in remote.values() {
             if !local_rel_set.contains(entry.relative_path.as_str()) {
                 remote_only.push(entry.clone());
@@ -475,7 +467,7 @@ mod tests {
         let file = write_test_file(&dir, "chunked.bin", &[0u8; 100000]);
 
         let chunks = SyncEngine::read_file_chunks(&file, 4096).unwrap();
-        let expected_chunks = (100000u64 + 4095) / 4096;
+        let expected_chunks = 100000u64.div_ceil(4096);
         assert_eq!(chunks.len() as u64, expected_chunks);
 
         // 写回

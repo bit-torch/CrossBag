@@ -9,6 +9,7 @@ pub mod config;
 pub mod daemon;
 pub mod easytier;
 pub mod network;
+pub mod pairing;
 pub mod protocol;
 pub mod service;
 pub mod state;

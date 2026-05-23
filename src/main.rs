@@ -24,9 +24,9 @@
 //! crossbag sync
 //! ```
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
-use crossbag::{cli, config, daemon, easytier, network, service, sync, watcher};
+use crossbag::{cli, config, daemon, easytier, network, pairing, service, sync, watcher};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{error, info, warn};
@@ -90,14 +90,22 @@ async fn handle_serve(_args: cli::ServeArgs, config_path: PathBuf) -> Result<()>
 
     // ========== 2. 网络 (先创建，后与 Daemon 绑定) ==========
     let mut network = network::NetworkManager::new(config.clone());
-    network.start().await?;
+
+    // 创建 Daemon → Network 的命令通道
+    let (network_cmd_tx, network_cmd_rx) = tokio::sync::mpsc::unbounded_channel();
 
     // ========== 3. 同步守护进程 ==========
-    let daemon = daemon::SyncDaemon::new(config.clone());
+    let mut daemon = daemon::SyncDaemon::new(config.clone());
     let action_tx = daemon.action_sender();
 
-    // 将 Daemon 的消息通道注入 Network (入站消息 → Daemon)
+    // 双向绑定:
+    //   Daemon → Network: network_cmd_tx
+    //   Network → Daemon: action_tx
+    daemon.set_network_sender(network_cmd_tx);
     network.set_action_sender(action_tx.clone());
+    network.set_command_receiver(network_cmd_rx);
+
+    network.start().await?;
 
     // 启动事件循环
     tokio::spawn(daemon.run());
@@ -400,6 +408,12 @@ async fn main() -> Result<()> {
         cli::Commands::Service(args) => {
             handle_service(args)?;
         }
+        cli::Commands::StartConnect(args) => {
+            handle_start_connect(args, config_path).await?;
+        }
+        cli::Commands::Connect(args) => {
+            handle_connect(args, config_path).await?;
+        }
         cli::Commands::Version => {
             print_version();
         }
@@ -434,6 +448,168 @@ fn handle_service(args: cli::ServiceArgs) -> Result<()> {
             println!("{}", status);
         }
     }
+
+    Ok(())
+}
+
+/// 处理 start-connect 命令
+async fn handle_start_connect(args: cli::StartConnectArgs, config_path: PathBuf) -> Result<()> {
+    let config = config::CrossBagConfig::load(&config_path)?;
+    let config = Arc::new(config);
+
+    println!("CrossBag Pairing Mode");
+    println!("=====================");
+    println!();
+
+    // 1. 启动 Easytier 作为监听方
+    let mut easytier_mgr = easytier::EasytierManager::new(config.easytier.clone());
+    match easytier_mgr.start_as_listener().await {
+        Ok(()) => info!("Easytier started in listener mode"),
+        Err(e) => {
+            // 回退到普通模式
+            warn!("Easytier listener mode failed: {}, trying standard mode", e);
+            easytier_mgr.start().await?;
+        }
+    }
+
+    // 2. 获取物理 IP
+    let physical_ip = if let Some(ref ip_str) = config.node.physical_ip {
+        ip_str
+            .parse::<std::net::Ipv4Addr>()
+            .context("Invalid physical_ip in config")?
+    } else {
+        match pairing::get_physical_ip() {
+            Ok(ip) => ip,
+            Err(_) => {
+                warn!("Could not detect physical IP, pairing code will not include direct address");
+                std::net::Ipv4Addr::new(0, 0, 0, 0)
+            }
+        }
+    };
+
+    let ip_bytes = physical_ip.octets();
+
+    // 3. 生成配对码
+    let mut listener = pairing::PairingListener::new(config.clone());
+    let code = listener.generate_code(ip_bytes)?;
+
+    println!("Pairing Code: {}", code);
+    println!();
+    println!("Share this code with the other machine.");
+    println!("Waiting for connection...");
+
+    // 4. 等待配对
+    let timeout_duration = if args.timeout == 0 {
+        tokio::time::Duration::from_secs(86400) // 24h as "infinite"
+    } else {
+        tokio::time::Duration::from_secs(args.timeout)
+    };
+
+    match listener.wait_for_pairing(timeout_duration).await {
+        Ok(peer_info) => {
+            println!();
+            println!(
+                "[Connected] Paired with '{}' (host: {})",
+                peer_info.node_name, peer_info.hostname
+            );
+
+            // 5. 保存 peer 到配置
+            if let Err(e) = pairing::save_peer_to_config(&config_path, &peer_info) {
+                error!("Failed to save peer to config: {}", e);
+            } else {
+                println!("Peer saved to configuration.");
+            }
+
+            println!();
+            println!("Use 'crossbag serve' to start syncing.");
+        }
+        Err(e) => {
+            println!();
+            println!("Pairing failed: {}", e);
+        }
+    }
+
+    // 停止 Easytier
+    easytier_mgr.stop().await?;
+
+    Ok(())
+}
+
+/// 处理 connect 命令
+async fn handle_connect(args: cli::ConnectArgs, config_path: PathBuf) -> Result<()> {
+    let config = config::CrossBagConfig::load(&config_path)?;
+    let config = Arc::new(config);
+
+    // 1. 解码配对码
+    let code = pairing::PairingCode::decode(&args.code)?;
+    println!("Decoded pairing code");
+    println!(
+        "  Target: {}:{}",
+        if code.has_physical_ip() {
+            code.physical_ip_str()
+        } else {
+            "discover via shared node".to_string()
+        },
+        code.easytier_port()
+    );
+
+    // 2. 验证网络参数
+    if !code.verify_network(
+        &config.easytier.network_name,
+        &config.easytier.network_secret,
+    ) {
+        anyhow::bail!(
+            "Network name/secret mismatch! The pairing code was generated for a different network. \
+             Check your crossbag.toml [easytier] section."
+        );
+    }
+
+    // 3. 启动 Easytier 加入网络
+    let mut easytier_mgr = easytier::EasytierManager::new(config.easytier.clone());
+    if code.has_physical_ip() {
+        let peer_url = code.peer_url();
+        println!("Connecting to {}...", peer_url);
+        easytier_mgr.start_with_peer(&peer_url).await?;
+    } else if let Some(ref external_node) = config.easytier.external_node {
+        println!("Connecting via shared node: {}...", external_node);
+        easytier_mgr.start_with_external_node(external_node).await?;
+    } else {
+        anyhow::bail!(
+            "Pairing code has no direct address and no external_node configured. \
+             Either set physical_ip on the other machine or add external_node to your config."
+        );
+    }
+
+    println!("Easytier network established.");
+
+    // 4. 使用 PairingConnector 连接
+    let connector = pairing::PairingConnector::new(config.clone());
+    let connect_timeout = tokio::time::Duration::from_secs(args.timeout);
+
+    match connector.connect(&code, connect_timeout).await {
+        Ok(peer_info) => {
+            println!(
+                "Paired with '{}' (host: {})... OK",
+                peer_info.node_name, peer_info.hostname
+            );
+
+            // 5. 保存 peer
+            if let Err(e) = pairing::save_peer_to_config(&config_path, &peer_info) {
+                error!("Failed to save peer to config: {}", e);
+            } else {
+                println!("Peer saved to configuration.");
+            }
+
+            println!();
+            println!("Use 'crossbag serve' to start syncing.");
+        }
+        Err(e) => {
+            println!("Connection failed: {}", e);
+        }
+    }
+
+    // 停止 Easytier
+    easytier_mgr.stop().await?;
 
     Ok(())
 }

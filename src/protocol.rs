@@ -24,6 +24,10 @@ pub enum Message {
     Handshake(Handshake),
     /// 握手确认
     HandshakeAck(HandshakeAck),
+    /// 配对请求 - 通过配对码连接时发送
+    PairRequest(PairRequest),
+    /// 配对响应 - 配对请求的回复
+    PairResponse(PairResponse),
     /// 文件索引 - 发送本节点文件列表
     FileIndex(FileIndex),
     /// 文件索引确认 - 返回差异文件列表
@@ -59,6 +63,36 @@ pub struct HandshakeAck {
     pub accepted: bool,
     pub node_id: Uuid,
     pub node_name: String,
+    pub message: Option<String>,
+}
+
+/// 配对请求 - 通过配对码发起连接时发送的首条消息
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PairRequest {
+    /// 协议版本
+    pub protocol_version: u32,
+    /// 认证令牌（从配对码解码）
+    pub auth_token: [u8; 4],
+    /// 发起方节点 ID
+    pub node_id: Uuid,
+    /// 发起方节点名称
+    pub node_name: String,
+    /// 发起方主机名
+    pub hostname: String,
+}
+
+/// 配对响应 - 配对请求的回复
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PairResponse {
+    /// 是否接受配对
+    pub accepted: bool,
+    /// 响应方节点 ID
+    pub node_id: Uuid,
+    /// 响应方节点名称
+    pub node_name: String,
+    /// 响应方的虚拟 IP（供发起方保存为 peer 地址）
+    pub virtual_ip: Option<String>,
+    /// 拒绝原因
     pub message: Option<String>,
 }
 
@@ -239,6 +273,20 @@ mod tests {
                 node_name: "n2".into(),
                 message: None,
             }),
+            Message::PairRequest(PairRequest {
+                protocol_version: 1,
+                auth_token: [0xDE, 0xAD, 0xBE, 0xEF],
+                node_id: Uuid::new_v4(),
+                node_name: "pair-node".into(),
+                hostname: "pair-host".into(),
+            }),
+            Message::PairResponse(PairResponse {
+                accepted: true,
+                node_id: Uuid::new_v4(),
+                node_name: "resp-node".into(),
+                virtual_ip: Some("10.144.144.1".into()),
+                message: None,
+            }),
             Message::Heartbeat(Heartbeat {
                 node_id: Uuid::new_v4(),
                 timestamp: Utc::now(),
@@ -261,6 +309,79 @@ mod tests {
                 std::mem::discriminant(&decoded),
                 "Message type mismatch after roundtrip"
             );
+        }
+    }
+
+    /// 测试 PairRequest 序列化往返
+    #[test]
+    fn test_pair_request_roundtrip() {
+        let original = Message::PairRequest(PairRequest {
+            protocol_version: PROTOCOL_VERSION,
+            auth_token: [0x0A, 0x1B, 0x2C, 0x3D],
+            node_id: Uuid::new_v4(),
+            node_name: "node-b".into(),
+            hostname: "workstation-b".into(),
+        });
+
+        let bytes = original.to_bytes().expect("serialize");
+        let decoded = Message::from_bytes(&bytes).expect("deserialize");
+
+        match decoded {
+            Message::PairRequest(req) => {
+                assert_eq!(req.protocol_version, PROTOCOL_VERSION);
+                assert_eq!(req.auth_token, [0x0A, 0x1B, 0x2C, 0x3D]);
+                assert_eq!(req.node_name, "node-b");
+                assert_eq!(req.hostname, "workstation-b");
+            }
+            _ => panic!("Expected PairRequest"),
+        }
+    }
+
+    /// 测试 PairResponse 序列化往返（含虚拟 IP）
+    #[test]
+    fn test_pair_response_with_virtual_ip() {
+        let original = Message::PairResponse(PairResponse {
+            accepted: true,
+            node_id: Uuid::new_v4(),
+            node_name: "node-a".into(),
+            virtual_ip: Some("10.144.144.5".into()),
+            message: None,
+        });
+
+        let bytes = original.to_bytes().expect("serialize");
+        let decoded = Message::from_bytes(&bytes).expect("deserialize");
+
+        match decoded {
+            Message::PairResponse(resp) => {
+                assert!(resp.accepted);
+                assert_eq!(resp.node_name, "node-a");
+                assert_eq!(resp.virtual_ip.as_deref(), Some("10.144.144.5"));
+            }
+            _ => panic!("Expected PairResponse"),
+        }
+    }
+
+    /// 测试 PairResponse 拒绝场景
+    #[test]
+    fn test_pair_response_rejected() {
+        let original = Message::PairResponse(PairResponse {
+            accepted: false,
+            node_id: Uuid::new_v4(),
+            node_name: "node-a".into(),
+            virtual_ip: None,
+            message: Some("Auth token mismatch".into()),
+        });
+
+        let bytes = original.to_bytes().expect("serialize");
+        let decoded = Message::from_bytes(&bytes).expect("deserialize");
+
+        match decoded {
+            Message::PairResponse(resp) => {
+                assert!(!resp.accepted);
+                assert!(resp.virtual_ip.is_none());
+                assert_eq!(resp.message.as_deref(), Some("Auth token mismatch"));
+            }
+            _ => panic!("Expected PairResponse"),
         }
     }
 

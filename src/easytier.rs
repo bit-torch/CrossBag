@@ -111,8 +111,8 @@ impl EasytierManager {
         }
     }
 
-    /// 构建 Easytier 命令行参数
-    fn build_args(&self, _binary: &str) -> Vec<String> {
+    /// 构建 Easytier 命令行参数（基础参数）
+    fn build_base_args(&self) -> Vec<String> {
         let mut args = vec![
             "--instance-name".to_string(),
             self.config.instance_name.clone(),
@@ -130,8 +130,13 @@ impl EasytierManager {
             args.push(self.config.listeners.join(" "));
         }
 
-        args.push("--disable-dhcp".to_string());
+        args
+    }
 
+    /// 构建 Easytier 命令行参数（兼容旧接口）
+    fn build_args(&self, _binary: &str) -> Vec<String> {
+        let mut args = self.build_base_args();
+        args.push("--disable-dhcp".to_string());
         args
     }
 
@@ -145,14 +150,86 @@ impl EasytierManager {
         let binary = self.check_binary()?;
         let args = self.build_args(&binary);
 
+        self.spawn_easytier(&binary, &args).await
+    }
+
+    /// 启动 Easytier 作为配对监听方（start-connect 模式）
+    ///
+    /// 监听物理端口，启用 DHCP，声明希望被 P2P 直连
+    pub async fn start_as_listener(&mut self) -> Result<()> {
+        if self.child.is_some() {
+            warn!("Easytier is already running");
+            return Ok(());
+        }
+
+        let binary = self.check_binary()?;
+        let mut args = self.build_base_args();
+
+        // 启用 DHCP 自动分配虚拟 IP
+        args.push("-d".to_string());
+
+        // 声明希望被 P2P 直连
+        args.push("--need-p2p".to_string());
+
+        info!("Starting Easytier as pairing listener (DHCP + need-p2p)");
+
+        self.spawn_easytier(&binary, &args).await
+    }
+
+    /// 启动 Easytier 并连接到指定对等节点（connect 模式，对方有物理 IP）
+    pub async fn start_with_peer(&mut self, peer_url: &str) -> Result<()> {
+        if self.child.is_some() {
+            warn!("Easytier is already running");
+            return Ok(());
+        }
+
+        let binary = self.check_binary()?;
+        let mut args = self.build_base_args();
+
+        // 启用 DHCP
+        args.push("-d".to_string());
+
+        // 连接到对方的 Easytier 实例
+        args.push("-p".to_string());
+        args.push(peer_url.to_string());
+
+        info!("Starting Easytier with peer: {}", peer_url);
+
+        self.spawn_easytier(&binary, &args).await
+    }
+
+    /// 启动 Easytier 并连接到公共共享节点（connect 模式，双方均无公网 IP）
+    pub async fn start_with_external_node(&mut self, external_node: &str) -> Result<()> {
+        if self.child.is_some() {
+            warn!("Easytier is already running");
+            return Ok(());
+        }
+
+        let binary = self.check_binary()?;
+        let mut args = self.build_base_args();
+
+        // 启用 DHCP
+        args.push("-d".to_string());
+
+        // 通过公共共享节点发现对等方
+        args.push("-e".to_string());
+        args.push(external_node.to_string());
+
+        info!("Starting Easytier with external node: {}", external_node);
+
+        self.spawn_easytier(&binary, &args).await
+    }
+
+    /// 通用的 Easytier 启动逻辑
+    async fn spawn_easytier(&mut self, binary: &str, args: &[String]) -> Result<()> {
         info!("Starting Easytier: {} {}", binary, args.join(" "));
 
-        let mut cmd = Command::new(&binary);
-        cmd.args(&args)
+        let mut cmd = Command::new(binary);
+        cmd.args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true); // 确保 CrossBag 退出时子进程也被终止
+            .kill_on_drop(true);
 
         // 平台特定设置
         #[cfg(windows)]

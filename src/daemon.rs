@@ -8,7 +8,8 @@
 //! ```
 
 use crate::config::{CrossBagConfig, SyncPair};
-use crate::protocol::{FileEntry, FileIndex, Message};
+use crate::network::NetworkCommand;
+use crate::protocol::{FileChunk, FileEntry, FileIndex, Message};
 use crate::state::SyncState;
 use crate::sync::SyncEngine;
 use crate::watcher::{FileChange, FileWatcher};
@@ -51,6 +52,8 @@ pub struct SyncDaemon {
     states: HashMap<String, SyncState>,
     action_tx: mpsc::UnboundedSender<SyncAction>,
     action_rx: mpsc::UnboundedReceiver<SyncAction>,
+    /// 向 NetworkManager 发送消息的通道
+    network_tx: Option<mpsc::UnboundedSender<NetworkCommand>>,
 }
 
 impl SyncDaemon {
@@ -87,12 +90,18 @@ impl SyncDaemon {
             states,
             action_tx,
             action_rx,
+            network_tx: None,
         }
     }
 
     /// 获取用于提交同步操作的事件发送端 (外部注入到 Watcher / Network)
     pub fn action_sender(&self) -> mpsc::UnboundedSender<SyncAction> {
         self.action_tx.clone()
+    }
+
+    /// 设置网络发送通道 (由 main.rs 注入)
+    pub fn set_network_sender(&mut self, tx: mpsc::UnboundedSender<NetworkCommand>) {
+        self.network_tx = Some(tx);
     }
 
     /// 启动同步事件循环
@@ -160,7 +169,7 @@ impl SyncDaemon {
     }
 
     /// 处理本地文件变更 (使用增量状态)
-    async fn handle_local_changes(&mut self, pair_id: &str, changes: &[FileChange]) -> Result<()> {
+    async fn handle_local_changes(&mut self, pair_id: &str, _changes: &[FileChange]) -> Result<()> {
         let pair = self.find_pair(pair_id)?.clone();
         let local_path = pair.local_path.clone();
         let exclude = pair.exclude_patterns.clone();
@@ -185,8 +194,19 @@ impl SyncDaemon {
             files: entries,
             timestamp: chrono::Utc::now(),
         });
-        let _ = index_msg;
-        let _ = changes;
+
+        // 通过 NetworkManager 发送索引给 remote_node
+        if let Some(ref tx) = self.network_tx {
+            let peer_id = pair.remote_node.clone();
+            if let Err(e) = tx.send(NetworkCommand::SendToPeer {
+                peer_id,
+                message: index_msg,
+            }) {
+                warn!("Failed to send FileIndex to network: {}", e);
+            }
+        } else {
+            warn!("Network channel not available, FileIndex not sent");
+        }
 
         debug!(
             "Incremental update for '{}': {} entries",
@@ -203,7 +223,7 @@ impl SyncDaemon {
         _peer_id: &str,
         remote_index: &FileIndex,
     ) -> Result<()> {
-        let pair = self.find_pair(pair_id)?;
+        let pair = self.find_pair(pair_id)?.clone();
 
         // 构建本地索引
         let local_index = SyncEngine::build_file_index(&pair.local_path, &pair.exclude_patterns)?;
@@ -225,15 +245,15 @@ impl SyncDaemon {
             remote_only.len()
         );
 
-        // 发送本地独有的文件 (对方需要)
+        // 通知对方本地独有的文件（对方需要拉取）
         if !local_only.is_empty() {
-            let request = Message::FileRequest(crate::protocol::FileRequest {
+            let response = Message::FileIndexAck(crate::protocol::FileIndexAck {
                 pair_id: pair_id.to_string(),
-                files: local_only.iter().map(|e| e.relative_path.clone()).collect(),
+                needed_files: Vec::new(), // 本方不需要
+                offered_files: local_only.iter().map(|e| e.relative_path.clone()).collect(),
             });
-            // TODO: 发送给 peer
-            debug!("Sending file request: {} files", local_only.len());
-            let _ = request;
+            debug!("Offering {} local-only files to peer", local_only.len());
+            self.send_to_peer(&pair.remote_node, response);
         }
 
         // 请求远程独有的文件 (本地需要)
@@ -245,9 +265,8 @@ impl SyncDaemon {
                     .map(|e| e.relative_path.clone())
                     .collect(),
             });
-            // TODO: 发送给 peer
-            debug!("Requesting files from peer: {} files", remote_only.len());
-            let _ = request;
+            debug!("Requesting {} files from peer", remote_only.len());
+            self.send_to_peer(&pair.remote_node, request);
         }
 
         Ok(())
@@ -280,7 +299,7 @@ impl SyncDaemon {
         _peer_id: &str,
         files: &[String],
     ) -> Result<()> {
-        let pair = self.find_pair(pair_id)?;
+        let pair = self.find_pair(pair_id)?.clone();
 
         for file_path in files {
             let full_path = pair.local_path.join(file_path);
@@ -293,14 +312,25 @@ impl SyncDaemon {
             let chunks = SyncEngine::read_file_chunks(&full_path, self.config.advanced.chunk_size)?;
 
             debug!(
-                "Prepared {} chunks for file '{}' (to peer {})",
+                "Sending {} chunks for file '{}' to peer '{}'",
                 chunks.len(),
                 file_path,
-                _peer_id
+                pair.remote_node
             );
 
-            // TODO: 通过 NetworkManager 发送 FileChunk 消息给 peer
-            let _ = chunks;
+            // 通过 NetworkManager 发送 FileChunk 消息给 peer
+            let total = chunks.len() as u32;
+            for (i, chunk_data) in chunks.into_iter().enumerate() {
+                let chunk_hash = blake3::hash(&chunk_data);
+                let chunk_msg = Message::FileChunk(FileChunk {
+                    relative_path: file_path.clone(),
+                    chunk_index: i as u32,
+                    total_chunks: total,
+                    data: chunk_data,
+                    chunk_hash,
+                });
+                self.send_to_peer(&pair.remote_node, chunk_msg);
+            }
         }
 
         Ok(())
@@ -313,6 +343,26 @@ impl SyncDaemon {
             .iter()
             .find(|p| p.id == pair_id)
             .ok_or_else(|| anyhow::anyhow!("Sync pair '{}' not found", pair_id))
+    }
+
+    /// 通过 NetworkManager 向指定 peer 发送消息
+    fn send_to_peer(&self, peer_id: &str, message: Message) {
+        if let Some(ref tx) = self.network_tx {
+            if let Err(e) = tx.send(NetworkCommand::SendToPeer {
+                peer_id: peer_id.to_string(),
+                message,
+            }) {
+                warn!(
+                    "Failed to send message to network for peer '{}': {}",
+                    peer_id, e
+                );
+            }
+        } else {
+            warn!(
+                "Network channel not available, message to '{}' dropped",
+                peer_id
+            );
+        }
     }
 }
 

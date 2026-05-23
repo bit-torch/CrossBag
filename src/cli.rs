@@ -65,6 +65,16 @@ pub enum Commands {
     /// 将 CrossBag 注册为系统服务，支持开机自启
     Service(ServiceArgs),
 
+    /// 生成配对码并等待连接
+    ///
+    /// 启动 Easytier 虚拟网络，生成一次性配对码，等待另一台机器使用该码连接
+    StartConnect(StartConnectArgs),
+
+    /// 使用配对码连接到远程节点
+    ///
+    /// 输入对方生成的配对码，自动加入虚拟网络并建立连接
+    Connect(ConnectArgs),
+
     /// 显示版本信息
     Version,
 }
@@ -158,4 +168,21 @@ pub struct ServiceArgs {
     /// 手动指定可执行文件路径
     #[arg(short, long)]
     pub binary: Option<PathBuf>,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct StartConnectArgs {
+    /// 配对超时（秒），0 表示无限等待
+    #[arg(short, long, default_value = "300")]
+    pub timeout: u64,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct ConnectArgs {
+    /// 配对码 (格式: XXXXX-XXXXX-XXXXX-XXXXX-XXXXX)
+    pub code: String,
+
+    /// 连接超时（秒）
+    #[arg(short, long, default_value = "30")]
+    pub timeout: u64,
 }

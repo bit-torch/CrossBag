@@ -31,6 +31,7 @@ fn test_easytier_custom_config() {
         health_check_interval: 30,
         max_restarts: 3,
         startup_timeout: 60,
+        external_node: None,
     };
 
     assert_eq!(config.binary_path, "/usr/local/bin/easytier-core");
@@ -107,8 +108,8 @@ fn test_config_with_secret_serialization() {
 fn test_protocol_version_compatibility() {
     use crossbag::protocol::PROTOCOL_VERSION;
 
-    // 协议版本不应为 0
-    assert!(PROTOCOL_VERSION > 0);
+    // 协议版本不应为 0 (编译期检查)
+    const _: () = assert!(PROTOCOL_VERSION > 0);
 
     // 当前版本为 1
     assert_eq!(PROTOCOL_VERSION, 1);

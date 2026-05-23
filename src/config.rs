@@ -43,6 +43,9 @@ pub struct NodeConfig {
     /// 监听端口
     #[serde(default = "default_port")]
     pub port: u16,
+    /// 手动指定物理 IP（用于生成配对码，留空则自动检测）
+    #[serde(default)]
+    pub physical_ip: Option<String>,
 }
 
 /// 网络配置
@@ -101,6 +104,9 @@ pub struct EasytierConfig {
     /// 启动等待超时 (秒)
     #[serde(default = "default_easytier_startup_timeout")]
     pub startup_timeout: u64,
+    /// 公共共享节点地址（双方均无公网 IP 时，通过此节点发现对等方）
+    #[serde(default)]
+    pub external_node: Option<String>,
 }
 
 impl Default for EasytierConfig {
@@ -115,6 +121,7 @@ impl Default for EasytierConfig {
             health_check_interval: default_easytier_health_interval(),
             max_restarts: 5,
             startup_timeout: default_easytier_startup_timeout(),
+            external_node: None,
         }
     }
 }
@@ -248,6 +255,27 @@ fn default_log_level() -> String {
     "info".to_string()
 }
 
+fn warn_empty_peers() {
+    tracing::warn!("No peers configured. Use 'crossbag start-connect' or 'crossbag connect' to add peers via pairing code.");
+}
+
+/// 解析监听器 URL 中的端口号（pairing 模块使用）
+pub trait ListenerUrlExt {
+    fn parse_url_port(&self) -> Option<u16>;
+}
+
+impl ListenerUrlExt for String {
+    fn parse_url_port(&self) -> Option<u16> {
+        // 格式: "tcp://0.0.0.0:11010" 或 "11010"
+        if let Some(colon_pos) = self.rfind(':') {
+            let port_str = &self[colon_pos + 1..];
+            port_str.parse().ok()
+        } else {
+            self.parse().ok()
+        }
+    }
+}
+
 fn hostname() -> Result<String> {
     Ok(hostname::get()
         .context("Failed to get hostname")?
@@ -276,6 +304,7 @@ impl CrossBagConfig {
                 name: default_node_name(),
                 listen_addr: default_listen_addr(),
                 port: default_port(),
+                physical_ip: None,
             },
             network: NetworkConfig {
                 peers: HashMap::new(),
@@ -323,8 +352,9 @@ impl CrossBagConfig {
 
     /// 验证配置有效性
     pub fn validate(&self) -> Result<()> {
+        // peers 为空时给出警告但不报错（配对模式下可能尚未添加 peer）
         if self.network.peers.is_empty() {
-            anyhow::bail!("At least one peer must be configured");
+            warn_empty_peers();
         }
 
         for pair in &self.sync_pairs {
@@ -423,14 +453,14 @@ mod tests {
         assert_eq!(SyncDirection::default(), SyncDirection::Bidirectional);
     }
 
-    /// 测试配置验证: 空的 peers 应报错
+    /// 测试配置验证: 空的 peers 不再报错（配对模式允许）
     #[test]
     fn test_validate_empty_peers() {
         let mut config = CrossBagConfig::default_config();
         config.network.peers.clear();
         let result = config.validate();
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("peer"));
+        // validate() 现在对空 peers 只给警告不报错
+        assert!(result.is_ok());
     }
 
     /// 测试配置验证: 有效的配置
