@@ -122,7 +122,16 @@ fn test_crossbag_semver() {
     // 验证是有效的 semver (x.y.z)
     let parts: Vec<&str> = version.split('.').collect();
     assert_eq!(parts.len(), 3, "Version should be semver: {}", version);
-    assert!(parts[0].parse::<u32>().is_ok(), "Major version should be number");
-    assert!(parts[1].parse::<u32>().is_ok(), "Minor version should be number");
-    assert!(parts[2].parse::<u32>().is_ok(), "Patch version should be number");
+    assert!(
+        parts[0].parse::<u32>().is_ok(),
+        "Major version should be number"
+    );
+    assert!(
+        parts[1].parse::<u32>().is_ok(),
+        "Minor version should be number"
+    );
+    assert!(
+        parts[2].parse::<u32>().is_ok(),
+        "Patch version should be number"
+    );
 }

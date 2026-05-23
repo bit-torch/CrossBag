@@ -202,7 +202,10 @@ async fn handle_sync(args: cli::SyncArgs, config_path: PathBuf) -> Result<()> {
     }
 
     for pair in pairs {
-        info!("Syncing pair '{}': {:?} -> {}", pair.id, pair.local_path, pair.remote_node);
+        info!(
+            "Syncing pair '{}': {:?} -> {}",
+            pair.id, pair.local_path, pair.remote_node
+        );
         match engine.full_sync(pair).await {
             Ok(result) => {
                 println!(
@@ -255,10 +258,7 @@ async fn handle_status(args: cli::StatusArgs, config_path: PathBuf) -> Result<()
         println!("    Direction: {:?}", pair.direction);
         if args.verbose {
             println!("    Watch: {}", pair.watch);
-            println!(
-                "    Full Sync Interval: {}s",
-                pair.full_sync_interval
-            );
+            println!("    Full Sync Interval: {}s", pair.full_sync_interval);
             if !pair.exclude_patterns.is_empty() {
                 println!("    Exclude: {:?}", pair.exclude_patterns);
             }
@@ -277,9 +277,9 @@ async fn handle_status(args: cli::StatusArgs, config_path: PathBuf) -> Result<()
 
 /// 处理 init 命令
 async fn handle_init(args: cli::InitArgs) -> Result<()> {
-    let output_path = args.output.unwrap_or_else(|| {
-        PathBuf::from(config::DEFAULT_CONFIG_FILE)
-    });
+    let output_path = args
+        .output
+        .unwrap_or_else(|| PathBuf::from(config::DEFAULT_CONFIG_FILE));
 
     if output_path.exists() && !args.force {
         anyhow::bail!(
@@ -350,7 +350,10 @@ async fn handle_list(config_path: PathBuf) -> Result<()> {
         return Ok(());
     }
 
-    println!("{:<20} {:<40} {:<20} {:<40}", "ID", "Local Path", "Remote Node", "Remote Path");
+    println!(
+        "{:<20} {:<40} {:<20} {:<40}",
+        "ID", "Local Path", "Remote Node", "Remote Path"
+    );
     println!("{}", "-".repeat(120));
 
     for pair in &config.sync_pairs {

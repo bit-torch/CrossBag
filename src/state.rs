@@ -73,13 +73,17 @@ impl SyncState {
             std::fs::create_dir_all(parent)?;
         }
 
-        let content = serde_json::to_string_pretty(self)
-            .context("Failed to serialize sync state")?;
+        let content =
+            serde_json::to_string_pretty(self).context("Failed to serialize sync state")?;
 
         std::fs::write(path, &content)
             .with_context(|| format!("Failed to write state file: {:?}", path))?;
 
-        debug!("Saved state for '{}': {} files", self.pair_id, self.files.len());
+        debug!(
+            "Saved state for '{}': {} files",
+            self.pair_id,
+            self.files.len()
+        );
         Ok(())
     }
 
@@ -109,9 +113,7 @@ impl SyncState {
                 let file_name = path.file_name().and_then(|n| n.to_str());
                 for pattern in exclude_patterns {
                     if let Ok(glob) = glob::Pattern::new(pattern) {
-                        if glob.matches_path(path)
-                            || file_name.map_or(false, |n| glob.matches(n))
-                        {
+                        if glob.matches_path(path) || file_name.map_or(false, |n| glob.matches(n)) {
                             return false;
                         }
                     }
@@ -300,7 +302,10 @@ mod tests {
         state.incremental_update(&dir, &[]).unwrap();
         let second_hash = state.files.get("unchanged.txt").unwrap().hash;
 
-        assert_eq!(first_hash, second_hash, "Hash should be reused when file unchanged");
+        assert_eq!(
+            first_hash, second_hash,
+            "Hash should be reused when file unchanged"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

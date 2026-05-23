@@ -27,10 +27,8 @@ fn write_file(dir: &Path, name: &str, content: &[u8]) -> PathBuf {
 
 /// 测试辅助: 递归比较两个目录的文件内容是否一致
 fn dirs_are_identical(a: &Path, b: &Path, exclude: &[&str]) -> bool {
-    let index_a = crossbag::sync::SyncEngine::build_file_index(a, &[])
-        .unwrap_or_default();
-    let index_b = crossbag::sync::SyncEngine::build_file_index(b, &[])
-        .unwrap_or_default();
+    let index_a = crossbag::sync::SyncEngine::build_file_index(a, &[]).unwrap_or_default();
+    let index_b = crossbag::sync::SyncEngine::build_file_index(b, &[]).unwrap_or_default();
 
     let a_paths: HashMap<String, _> = index_a
         .values()
@@ -78,7 +76,11 @@ fn test_initial_full_sync() {
     // 在 node_a 创建文件
     write_file(&node_a, "readme.md", b"# CrossBag Docs");
     write_file(&node_a, "config.toml", b"[core]\nversion = \"1.0\"");
-    write_file(&node_a, "src/main.rs", b"fn main() { println!(\"hello\"); }");
+    write_file(
+        &node_a,
+        "src/main.rs",
+        b"fn main() { println!(\"hello\"); }",
+    );
 
     // 构建两边的文件索引
     let index_a = crossbag::sync::SyncEngine::build_file_index(&node_a, &[]).unwrap();
@@ -109,7 +111,10 @@ fn test_initial_full_sync() {
     }
 
     // 验证: node_b 现在应该包含 node_a 的所有文件
-    assert!(dirs_are_identical(&node_a, &node_b, &[]), "After sync, dirs should be identical");
+    assert!(
+        dirs_are_identical(&node_a, &node_b, &[]),
+        "After sync, dirs should be identical"
+    );
 
     // 清理
     let _ = std::fs::remove_dir_all(&node_a);
@@ -167,7 +172,11 @@ fn test_sync_nested_directories() {
     let node_b = temp_dir("node_b_nest");
 
     write_file(&node_a, "src/main.rs", b"fn main() {}");
-    write_file(&node_a, "src/lib.rs", b"pub fn add(a: i32, b: i32) -> i32 { a + b }");
+    write_file(
+        &node_a,
+        "src/lib.rs",
+        b"pub fn add(a: i32, b: i32) -> i32 { a + b }",
+    );
     write_file(&node_a, "src/utils/helpers.rs", b"pub fn greet() {}");
     write_file(&node_a, "tests/test_main.rs", b"#[test]\nfn test() {}");
     write_file(&node_a, "Cargo.toml", b"[package]\nname = \"test\"");
@@ -194,13 +203,18 @@ fn test_sync_nested_directories() {
 
     // 验证所有文件都存在且相同
     let index_b_after = crossbag::sync::SyncEngine::build_file_index(&node_b, &[]).unwrap();
-    let b_files: Vec<&str> = index_b_after.values()
+    let b_files: Vec<&str> = index_b_after
+        .values()
         .filter(|e| !e.is_dir)
         .map(|e| e.relative_path.as_str())
         .collect();
 
-    assert!(b_files.iter().any(|p| p.contains("main.rs") && p.contains("src")));
-    assert!(b_files.iter().any(|p| p.contains("lib.rs") && p.contains("src")));
+    assert!(b_files
+        .iter()
+        .any(|p| p.contains("main.rs") && p.contains("src")));
+    assert!(b_files
+        .iter()
+        .any(|p| p.contains("lib.rs") && p.contains("src")));
     assert!(b_files.iter().any(|p| p.contains("helpers.rs")));
     assert!(b_files.iter().any(|p| p.contains("test_main.rs")));
     assert!(b_files.iter().any(|p| p.contains("Cargo.toml")));
@@ -341,16 +355,16 @@ fn test_protocol_message_pipeline() {
     use crossbag::protocol::*;
 
     // 构建完整的 FileIndex 消息
-    let files: Vec<FileEntry> = (0..100).map(|i| {
-        FileEntry {
+    let files: Vec<FileEntry> = (0..100)
+        .map(|i| FileEntry {
             relative_path: format!("dir/file_{}.txt", i),
             size: (i * 1024) as u64,
             modified: chrono::Utc::now(),
             hash: blake3::hash(format!("content_{}", i).as_bytes()),
             is_dir: false,
             mode: 0,
-        }
-    }).collect();
+        })
+        .collect();
 
     let msg = Message::FileIndex(FileIndex {
         pair_id: "integration-test".into(),

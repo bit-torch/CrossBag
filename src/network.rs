@@ -84,10 +84,7 @@ impl NetworkManager {
         }
 
         // 启动 TCP 监听
-        let listen_addr = format!(
-            "{}:{}",
-            self.config.node.listen_addr, self.config.node.port
-        );
+        let listen_addr = format!("{}:{}", self.config.node.listen_addr, self.config.node.port);
 
         let listener = TcpListener::bind(&listen_addr)
             .await
@@ -141,7 +138,8 @@ impl NetworkManager {
                     peers
                         .iter()
                         .filter(|(id, _)| {
-                            conns.get(*id)
+                            conns
+                                .get(*id)
                                 .map(|c| c.state != ConnectionState::Connected)
                                 .unwrap_or(true)
                         })
@@ -170,16 +168,14 @@ impl NetworkManager {
                             info!("Connected to peer {}", peer_id);
 
                             // 发送握手
-                            let handshake = Message::Handshake(
-                                crate::protocol::Handshake {
-                                    protocol_version: crate::protocol::PROTOCOL_VERSION,
-                                    node_id: Uuid::new_v4(), // TODO: use actual node_id
-                                    node_name: "crossbag-node".to_string(),
-                                    hostname: hostname::get()
-                                        .map(|h| h.to_string_lossy().to_string())
-                                        .unwrap_or_default(),
-                                },
-                            );
+                            let handshake = Message::Handshake(crate::protocol::Handshake {
+                                protocol_version: crate::protocol::PROTOCOL_VERSION,
+                                node_id: Uuid::new_v4(), // TODO: use actual node_id
+                                node_name: "crossbag-node".to_string(),
+                                hostname: hostname::get()
+                                    .map(|h| h.to_string_lossy().to_string())
+                                    .unwrap_or_default(),
+                            });
 
                             let mut conns = connections.write().await;
                             if let Some(conn) = conns.get_mut(&peer_id) {
@@ -241,7 +237,8 @@ impl NetworkManager {
                 // 获取需要发送心跳的 peer 列表
                 let connected_peers: Vec<String> = {
                     let conns = connections.read().await;
-                    conns.iter()
+                    conns
+                        .iter()
                         .filter(|(_, c)| c.state == ConnectionState::Connected)
                         .map(|(id, _)| id.clone())
                         .collect()
@@ -258,7 +255,8 @@ impl NetworkManager {
                             framed.extend_from_slice(&heartbeat_bytes);
                             if let Err(e) = stream.write_all(&framed).await {
                                 warn!("Failed to send heartbeat to {}: {}", peer_id, e);
-                                conn.state = ConnectionState::Failed(format!("Heartbeat failed: {}", e));
+                                conn.state =
+                                    ConnectionState::Failed(format!("Heartbeat failed: {}", e));
                             }
                         }
                     }
@@ -269,9 +267,7 @@ impl NetworkManager {
 
     /// 发送消息到指定对等节点
     pub async fn send_to_peer(&self, peer_id: &str, message: &Message) -> Result<()> {
-        let data = message
-            .to_bytes()
-            .context("Failed to serialize message")?;
+        let data = message.to_bytes().context("Failed to serialize message")?;
 
         // 前缀长度 (4 bytes)
         let len = data.len() as u32;
@@ -296,7 +292,8 @@ impl NetworkManager {
     /// 获取所有连接状态
     pub async fn get_connection_states(&self) -> HashMap<String, ConnectionState> {
         let conns = self.connections.read().await;
-        conns.iter()
+        conns
+            .iter()
             .map(|(id, conn)| (id.clone(), conn.state.clone()))
             .collect()
     }

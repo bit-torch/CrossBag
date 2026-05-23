@@ -40,9 +40,7 @@ pub enum SyncAction {
         files: Vec<String>,
     },
     /// 定时全量同步
-    PeriodicFullSync {
-        pair_id: String,
-    },
+    PeriodicFullSync { pair_id: String },
 }
 
 /// 事件驱动同步守护进程
@@ -65,7 +63,11 @@ impl SyncDaemon {
             let state_path = SyncState::default_path(&pair.id);
             match SyncState::load(&state_path) {
                 Ok(Some(state)) => {
-                    info!("Loaded persisted state for '{}': {} files", pair.id, state.files.len());
+                    info!(
+                        "Loaded persisted state for '{}': {} files",
+                        pair.id,
+                        state.files.len()
+                    );
                     states.insert(pair.id.clone(), state);
                 }
                 Ok(None) => {
@@ -113,7 +115,11 @@ impl SyncDaemon {
                     }
                 }
 
-                SyncAction::RemoteIndex { pair_id, peer_id, index } => {
+                SyncAction::RemoteIndex {
+                    pair_id,
+                    peer_id,
+                    index,
+                } => {
                     debug!(
                         "Received remote index from '{}' for pair '{}': {} files",
                         peer_id,
@@ -125,7 +131,11 @@ impl SyncDaemon {
                     }
                 }
 
-                SyncAction::RemoteFileRequest { pair_id, peer_id, files } => {
+                SyncAction::RemoteFileRequest {
+                    pair_id,
+                    peer_id,
+                    files,
+                } => {
                     debug!(
                         "Peer '{}' requests {} files for pair '{}'",
                         peer_id,
@@ -155,7 +165,9 @@ impl SyncDaemon {
         let local_path = pair.local_path.clone();
         let exclude = pair.exclude_patterns.clone();
 
-        let state = self.states.get_mut(pair_id)
+        let state = self
+            .states
+            .get_mut(pair_id)
             .ok_or_else(|| anyhow::anyhow!("No state for pair '{}'", pair_id))?;
 
         // 增量更新 (仅重哈希变更的文件)
@@ -176,7 +188,11 @@ impl SyncDaemon {
         let _ = index_msg;
         let _ = changes;
 
-        debug!("Incremental update for '{}': {} entries", pair_id, state.files.len());
+        debug!(
+            "Incremental update for '{}': {} entries",
+            pair_id,
+            state.files.len()
+        );
         Ok(())
     }
 
@@ -200,8 +216,7 @@ impl SyncDaemon {
             .collect();
 
         // 计算差异
-        let (local_only, remote_only) =
-            SyncEngine::diff_indexes(&local_index, &remote_map);
+        let (local_only, remote_only) = SyncEngine::diff_indexes(&local_index, &remote_map);
 
         info!(
             "Sync '{}': {} local-only, {} remote-only files",
@@ -225,7 +240,10 @@ impl SyncDaemon {
         if !remote_only.is_empty() {
             let request = Message::FileRequest(crate::protocol::FileRequest {
                 pair_id: pair_id.to_string(),
-                files: remote_only.iter().map(|e| e.relative_path.clone()).collect(),
+                files: remote_only
+                    .iter()
+                    .map(|e| e.relative_path.clone())
+                    .collect(),
             });
             // TODO: 发送给 peer
             debug!("Requesting files from peer: {} files", remote_only.len());
@@ -272,10 +290,7 @@ impl SyncDaemon {
             }
 
             // 读取文件并准备分块传输
-            let chunks = SyncEngine::read_file_chunks(
-                &full_path,
-                self.config.advanced.chunk_size,
-            )?;
+            let chunks = SyncEngine::read_file_chunks(&full_path, self.config.advanced.chunk_size)?;
 
             debug!(
                 "Prepared {} chunks for file '{}' (to peer {})",

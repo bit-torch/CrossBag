@@ -80,11 +80,19 @@ impl EasytierManager {
             format!("which {}", path)
         };
 
-        let output = std::process::Command::new(if cfg!(target_os = "windows") { "cmd" } else { "sh" })
-            .arg(if cfg!(target_os = "windows") { "/c" } else { "-c" })
-            .arg(&which_cmd)
-            .output()
-            .context("Failed to search for easytier binary")?;
+        let output = std::process::Command::new(if cfg!(target_os = "windows") {
+            "cmd"
+        } else {
+            "sh"
+        })
+        .arg(if cfg!(target_os = "windows") {
+            "/c"
+        } else {
+            "-c"
+        })
+        .arg(&which_cmd)
+        .output()
+        .context("Failed to search for easytier binary")?;
 
         if output.status.success() {
             let found = String::from_utf8_lossy(&output.stdout)
@@ -161,10 +169,7 @@ impl EasytierManager {
             .spawn()
             .with_context(|| format!("Failed to start Easytier process: {}", binary))?;
 
-        info!(
-            "Easytier started with PID: {}",
-            child.id().unwrap_or(0)
-        );
+        info!("Easytier started with PID: {}", child.id().unwrap_or(0));
 
         self.child = Some(child);
 
@@ -340,8 +345,11 @@ impl EasytierManager {
         match &mut self.child {
             None => {
                 if self.config.auto_start && self.restart_count < self.config.max_restarts {
-                    warn!("Easytier not running, attempting restart ({}/{})",
-                          self.restart_count + 1, self.config.max_restarts);
+                    warn!(
+                        "Easytier not running, attempting restart ({}/{})",
+                        self.restart_count + 1,
+                        self.config.max_restarts
+                    );
                     self.restart_count += 1;
                     match self.start().await {
                         Ok(()) => EasytierState::Running,
@@ -351,9 +359,10 @@ impl EasytierManager {
                         }
                     }
                 } else if self.restart_count >= self.config.max_restarts {
-                    EasytierState::Failed(
-                        format!("Max restarts ({}) reached", self.config.max_restarts)
-                    )
+                    EasytierState::Failed(format!(
+                        "Max restarts ({}) reached",
+                        self.config.max_restarts
+                    ))
                 } else {
                     EasytierState::Stopped
                 }
@@ -361,17 +370,13 @@ impl EasytierManager {
             Some(ref mut child) => {
                 match child.try_wait() {
                     Ok(Some(status)) => {
-                        let err_msg = format!(
-                            "Easytier exited unexpectedly with status: {}",
-                            status
-                        );
+                        let err_msg =
+                            format!("Easytier exited unexpectedly with status: {}", status);
                         error!("{}", err_msg);
                         self.child = None;
 
                         // 自动重启
-                        if self.config.auto_start
-                            && self.restart_count < self.config.max_restarts
-                        {
+                        if self.config.auto_start && self.restart_count < self.config.max_restarts {
                             self.restart_count += 1;
                             warn!(
                                 "Auto-restarting Easytier ({}/{})...",

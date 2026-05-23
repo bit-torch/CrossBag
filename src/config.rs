@@ -299,16 +299,15 @@ impl CrossBagConfig {
         let content = std::fs::read_to_string(path.as_ref())
             .with_context(|| format!("Failed to read config file: {:?}", path.as_ref()))?;
 
-        let config: CrossBagConfig = toml::from_str(&content)
-            .with_context(|| "Failed to parse config file")?;
+        let config: CrossBagConfig =
+            toml::from_str(&content).with_context(|| "Failed to parse config file")?;
 
         Ok(config)
     }
 
     /// 保存配置到文件
     pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<()> {
-        let content = toml::to_string_pretty(self)
-            .context("Failed to serialize config")?;
+        let content = toml::to_string_pretty(self).context("Failed to serialize config")?;
 
         if let Some(parent) = path.as_ref().parent() {
             std::fs::create_dir_all(parent)?;
@@ -322,7 +321,8 @@ impl CrossBagConfig {
 
     /// 获取默认配置文件路径
     pub fn default_path() -> PathBuf {
-        dirs_next().unwrap_or_else(|| PathBuf::from("."))
+        dirs_next()
+            .unwrap_or_else(|| PathBuf::from("."))
             .join(DEFAULT_CONFIG_FILE)
     }
 
@@ -369,9 +369,12 @@ fn dirs_next() -> Option<PathBuf> {
 
     #[cfg(target_os = "macos")]
     {
-        std::env::var("HOME")
-            .ok()
-            .map(|h| PathBuf::from(h).join("Library").join("Application Support").join("crossbag"))
+        std::env::var("HOME").ok().map(|h| {
+            PathBuf::from(h)
+                .join("Library")
+                .join("Application Support")
+                .join("crossbag")
+        })
     }
 
     #[cfg(target_os = "windows")]
@@ -448,7 +451,11 @@ mod tests {
         );
         // 没有 sync_pairs 应该也是有效的 (validate 不检查空 sync_pairs)
         let result = config.validate();
-        assert!(result.is_ok(), "Expected valid config, got: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Expected valid config, got: {:?}",
+            result.err()
+        );
     }
 
     /// 测试 SyncDirection 序列化

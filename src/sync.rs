@@ -161,10 +161,8 @@ impl SyncEngine {
         let mut remote_only = Vec::new();
 
         // 找出本地有但远程没有的文件
-        let remote_rel_paths: HashSet<&str> = remote
-            .values()
-            .map(|e| e.relative_path.as_str())
-            .collect();
+        let remote_rel_paths: HashSet<&str> =
+            remote.values().map(|e| e.relative_path.as_str()).collect();
 
         let _local_rel_map: HashMap<&str, &FileEntry> = local
             .values()
@@ -228,19 +226,21 @@ impl SyncEngine {
         info!("Starting full sync for pair '{}'", pair.id);
 
         // 构建本地文件索引
-        let local_index = match SyncEngine::build_file_index(&pair.local_path, &pair.exclude_patterns) {
-            Ok(idx) => idx,
-            Err(e) => {
-                result.errors.push(format!("Failed to build local index: {}", e));
-                return Ok(result);
-            }
-        };
+        let local_index =
+            match SyncEngine::build_file_index(&pair.local_path, &pair.exclude_patterns) {
+                Ok(idx) => idx,
+                Err(e) => {
+                    result
+                        .errors
+                        .push(format!("Failed to build local index: {}", e));
+                    return Ok(result);
+                }
+            };
 
         // TODO: 从远程节点获取远程文件索引
         // 目前仅构建本地索引，需要配合网络模块获取远程索引
 
-        self.index_cache
-            .insert(pair.id.clone(), local_index);
+        self.index_cache.insert(pair.id.clone(), local_index);
 
         info!(
             "Sync complete for pair '{}': {} changes",
@@ -260,17 +260,11 @@ impl SyncEngine {
     }
 
     /// 将文件分块读取
-    pub fn read_file_chunks(
-        path: &Path,
-        chunk_size: usize,
-    ) -> Result<Vec<Vec<u8>>> {
-        let data = std::fs::read(path)
-            .with_context(|| format!("Failed to read file: {:?}", path))?;
+    pub fn read_file_chunks(path: &Path, chunk_size: usize) -> Result<Vec<Vec<u8>>> {
+        let data =
+            std::fs::read(path).with_context(|| format!("Failed to read file: {:?}", path))?;
 
-        let chunks: Vec<Vec<u8>> = data
-            .chunks(chunk_size)
-            .map(|c| c.to_vec())
-            .collect();
+        let chunks: Vec<Vec<u8>> = data.chunks(chunk_size).map(|c| c.to_vec()).collect();
 
         Ok(chunks)
     }
@@ -287,8 +281,7 @@ impl SyncEngine {
             data.extend_from_slice(chunk);
         }
 
-        std::fs::write(path, &data)
-            .with_context(|| format!("Failed to write file: {:?}", path))?;
+        std::fs::write(path, &data).with_context(|| format!("Failed to write file: {:?}", path))?;
 
         Ok(())
     }
@@ -378,7 +371,11 @@ mod tests {
         let index = SyncEngine::build_file_index(&dir, &[]).unwrap();
         // 应该有 3 个文件 (subdir 是目录，可能被 walkdir 跳过 root 后的条目)
         let file_count = index.values().filter(|e| !e.is_dir).count();
-        assert!(file_count >= 2, "Expected at least 2 files, got {}", file_count);
+        assert!(
+            file_count >= 2,
+            "Expected at least 2 files, got {}",
+            file_count
+        );
 
         // 验证每个条目都有路径、大小和哈希
         for entry in index.values() {
@@ -400,11 +397,7 @@ mod tests {
         std::fs::create_dir_all(dir.join("node_modules")).unwrap();
         write_test_file(&dir, "node_modules/pkg.js", b"console.log('x')");
 
-        let index = SyncEngine::build_file_index(
-            &dir,
-            &["*.tmp".into()],
-        )
-        .unwrap();
+        let index = SyncEngine::build_file_index(&dir, &["*.tmp".into()]).unwrap();
 
         // 不应包含 .tmp 文件
         let paths: Vec<&str> = index.values().map(|e| e.relative_path.as_str()).collect();
