@@ -11,5 +11,6 @@ pub mod easytier;
 pub mod network;
 pub mod protocol;
 pub mod service;
+pub mod state;
 pub mod sync;
 pub mod watcher;

@@ -9,6 +9,7 @@
 
 use crate::config::{CrossBagConfig, SyncPair};
 use crate::protocol::{FileEntry, FileIndex, Message};
+use crate::state::SyncState;
 use crate::sync::SyncEngine;
 use crate::watcher::{FileChange, FileWatcher};
 use anyhow::Result;
@@ -48,6 +49,8 @@ pub enum SyncAction {
 pub struct SyncDaemon {
     config: Arc<CrossBagConfig>,
     engine: SyncEngine,
+    /// 每对同步对的状态缓存
+    states: HashMap<String, SyncState>,
     action_tx: mpsc::UnboundedSender<SyncAction>,
     action_rx: mpsc::UnboundedReceiver<SyncAction>,
 }
@@ -55,9 +58,31 @@ pub struct SyncDaemon {
 impl SyncDaemon {
     pub fn new(config: Arc<CrossBagConfig>) -> Self {
         let (action_tx, action_rx) = mpsc::unbounded_channel();
+
+        // 启动时加载所有持久化状态
+        let mut states = HashMap::new();
+        for pair in &config.sync_pairs {
+            let state_path = SyncState::default_path(&pair.id);
+            match SyncState::load(&state_path) {
+                Ok(Some(state)) => {
+                    info!("Loaded persisted state for '{}': {} files", pair.id, state.files.len());
+                    states.insert(pair.id.clone(), state);
+                }
+                Ok(None) => {
+                    debug!("No persisted state for '{}', starting fresh", pair.id);
+                    states.insert(pair.id.clone(), SyncState::new(&pair.id));
+                }
+                Err(e) => {
+                    warn!("Failed to load state for '{}': {}", pair.id, e);
+                    states.insert(pair.id.clone(), SyncState::new(&pair.id));
+                }
+            }
+        }
+
         SyncDaemon {
             engine: SyncEngine::new(config.clone()),
             config,
+            states,
             action_tx,
             action_rx,
         }
@@ -124,31 +149,34 @@ impl SyncDaemon {
         info!("Sync daemon event loop stopped");
     }
 
-    /// 处理本地文件变更
+    /// 处理本地文件变更 (使用增量状态)
     async fn handle_local_changes(&mut self, pair_id: &str, changes: &[FileChange]) -> Result<()> {
-        // 找到对应的同步对配置
-        let pair = self.find_pair(pair_id)?;
+        let pair = self.find_pair(pair_id)?.clone();
+        let local_path = pair.local_path.clone();
+        let exclude = pair.exclude_patterns.clone();
 
-        // 重新构建本地文件索引
-        let local_index = SyncEngine::build_file_index(&pair.local_path, &pair.exclude_patterns)?;
+        let state = self.states.get_mut(pair_id)
+            .ok_or_else(|| anyhow::anyhow!("No state for pair '{}'", pair_id))?;
 
-        // 通知所有连接的远程节点
+        // 增量更新 (仅重哈希变更的文件)
+        let entries = state.incremental_update(&local_path, &exclude)?;
+
+        // 保存状态
+        let state_path = SyncState::default_path(pair_id);
+        if let Err(e) = state.save(&state_path) {
+            warn!("Failed to save state for '{}': {}", pair_id, e);
+        }
+
+        // 通知远程节点
         let index_msg = Message::FileIndex(FileIndex {
             pair_id: pair_id.to_string(),
-            files: local_index.values().cloned().collect(),
+            files: entries,
             timestamp: chrono::Utc::now(),
         });
-
-        // TODO: 通过 NetworkManager 发送 index_msg 给所有已连接 peer
         let _ = index_msg;
         let _ = changes;
 
-        debug!(
-            "Local index for '{}' built: {} files",
-            pair_id,
-            local_index.len()
-        );
-
+        debug!("Incremental update for '{}': {} entries", pair_id, state.files.len());
         Ok(())
     }
 
