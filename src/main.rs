@@ -399,6 +399,9 @@ async fn main() -> Result<()> {
         cli::Commands::Service(args) => {
             handle_service(args)?;
         }
+        cli::Commands::Version => {
+            print_version();
+        }
     }
 
     Ok(())
@@ -432,4 +435,12 @@ fn handle_service(args: cli::ServiceArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// 打印版本信息
+fn print_version() {
+    println!("CrossBag {}", env!("CARGO_PKG_VERSION"));
+    println!("Protocol version: {}", crossbag::protocol::PROTOCOL_VERSION);
+    println!("License: {}", env!("CARGO_PKG_LICENSE"));
+    println!("Repository: https://github.com/bit-torch/CrossBag");
 }

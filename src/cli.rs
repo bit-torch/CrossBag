@@ -64,6 +64,9 @@ pub enum Commands {
     ///
     /// 将 CrossBag 注册为系统服务，支持开机自启
     Service(ServiceArgs),
+
+    /// 显示版本信息
+    Version,
 }
 
 #[derive(clap::Args, Debug)]
