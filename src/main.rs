@@ -149,7 +149,8 @@ async fn handle_serve(_args: cli::ServeArgs, config_path: PathBuf) -> Result<()>
             let mut ticker = tokio::time::interval(tokio::time::Duration::from_secs(interval));
             loop {
                 ticker.tick().await;
-                if let easytier::EasytierState::Failed(msg) = mgr.lock().await.health_check().await {
+                if let easytier::EasytierState::Failed(msg) = mgr.lock().await.health_check().await
+                {
                     error!("Easytier failed: {}", msg);
                     break;
                 }
