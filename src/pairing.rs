@@ -865,10 +865,10 @@ fn find_physical_ip_unix(output: &str) -> Result<Ipv4Addr> {
             if parts.len() >= 2 {
                 if let Some(ip_str) = parts[1].split('/').next() {
                     if let Ok(ip) = ip_str.parse::<Ipv4Addr>() {
-                        if !ip.is_loopback() && !is_easytier_ip(ip) {
-                            if best_ip.is_none() || is_lan_ip(ip) {
-                                best_ip = Some(ip);
-                            }
+                        if !ip.is_loopback() && !is_easytier_ip(ip)
+                            && (best_ip.is_none() || is_lan_ip(ip))
+                        {
+                            best_ip = Some(ip);
                         }
                     }
                 }
