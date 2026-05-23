@@ -301,7 +301,9 @@ impl EasytierManager {
             {
                 use tokio::signal::unix::SignalKind;
                 let pid = child.id().unwrap_or(0) as i32;
-                unsafe { libc::kill(pid, SignalKind::terminate().as_raw_value()); }
+                unsafe {
+                    libc::kill(pid, SignalKind::terminate().as_raw_value());
+                }
             }
 
             #[cfg(windows)]
