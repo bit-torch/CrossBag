@@ -1,6 +1,5 @@
 name: Release
 
-# 手动触发，或由打 tag 触发
 on:
   push:
     tags:
@@ -9,6 +8,9 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -68,3 +70,29 @@ jobs:
             target/${{ matrix.target }}/release/${{ matrix.binary }}
             target/${{ matrix.target }}/release/${{ matrix.asset_name }}.sha256
           retention-days: 30
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Publish release with all assets
+        uses: softprops/action-gh-release@v2
+        with:
+          name: CrossBag ${{ github.ref_name }}
+          draft: false
+          generate_release_notes: true
+          files: |
+            artifacts/crossbag-linux-x86_64/crossbag
+            artifacts/crossbag-linux-x86_64/crossbag-linux-x86_64.sha256
+            artifacts/crossbag-macos-x86_64/crossbag
+            artifacts/crossbag-macos-x86_64/crossbag-macos-x86_64.sha256
+            artifacts/crossbag-windows-x86_64.exe/crossbag.exe
+            artifacts/crossbag-windows-x86_64.exe/crossbag-windows-x86_64.exe.sha256
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
