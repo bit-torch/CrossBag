@@ -4,13 +4,14 @@
 //! 提供连接管理、消息收发和心跳维持功能。
 
 use crate::config::{CrossBagConfig, PeerConfig};
+use crate::daemon::SyncAction;
 use crate::protocol::Message;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio::time::{interval, timeout, Duration};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
@@ -41,6 +42,8 @@ pub struct NetworkManager {
     connections: Arc<RwLock<HashMap<String, PeerConnection>>>,
     /// 是否正在运行
     running: Arc<Mutex<bool>>,
+    /// 消息转发到 Daemon 的通道
+    action_tx: Option<mpsc::UnboundedSender<SyncAction>>,
 }
 
 impl NetworkManager {
@@ -50,7 +53,13 @@ impl NetworkManager {
             config,
             connections: Arc::new(RwLock::new(HashMap::new())),
             running: Arc::new(Mutex::new(false)),
+            action_tx: None,
         }
+    }
+
+    /// 设置 Daemon 消息通道
+    pub fn set_action_sender(&mut self, tx: mpsc::UnboundedSender<SyncAction>) {
+        self.action_tx = Some(tx);
     }
 
     /// 启动网络服务 (监听 + 连接)
@@ -89,6 +98,7 @@ impl NetworkManager {
         // 接受连接循环
         let connections = self.connections.clone();
         let node_config = self.config.clone();
+        let action_tx = self.action_tx.clone();
 
         tokio::spawn(async move {
             loop {
@@ -99,6 +109,7 @@ impl NetworkManager {
                             stream,
                             connections.clone(),
                             node_config.clone(),
+                            action_tx.clone(),
                         ));
                     }
                     Err(e) => {
@@ -308,6 +319,7 @@ async fn handle_incoming_connection(
     mut stream: TcpStream,
     connections: Arc<RwLock<HashMap<String, PeerConnection>>>,
     _config: Arc<CrossBagConfig>,
+    action_tx: Option<mpsc::UnboundedSender<SyncAction>>,
 ) {
     let peer_addr = stream
         .peer_addr()
@@ -325,19 +337,16 @@ async fn handle_incoming_connection(
 
     let msg_len = u32::from_be_bytes(len_buf) as usize;
     if msg_len > 100 * 1024 * 1024 {
-        // 100MB limit
         error!("Message too large from {}: {} bytes", peer_addr, msg_len);
         return;
     }
 
-    // 读取消息体
     let mut msg_buf = vec![0u8; msg_len];
     if let Err(e) = stream.read_exact(&mut msg_buf).await {
         error!("Failed to read message from {}: {}", peer_addr, e);
         return;
     }
 
-    // 解析消息
     match Message::from_bytes(&msg_buf) {
         Ok(Message::Handshake(handshake)) => {
             info!(
@@ -345,10 +354,9 @@ async fn handle_incoming_connection(
                 handshake.node_name, handshake.node_id
             );
 
-            // 发送握手确认
             let ack = Message::HandshakeAck(crate::protocol::HandshakeAck {
                 accepted: true,
-                node_id: Uuid::new_v4(), // TODO: use actual node_id
+                node_id: Uuid::new_v4(),
                 node_name: "crossbag-node".to_string(),
                 message: None,
             });
@@ -361,17 +369,42 @@ async fn handle_incoming_connection(
                 let _ = stream.write_all(&framed).await;
             }
 
-            // 保持连接并处理后续消息
-            handle_peer_messages(stream, peer_addr, connections).await;
+            handle_peer_messages(stream, peer_addr, connections, action_tx).await;
         }
-        Ok(message) => {
-            warn!(
-                "Expected handshake from {}, got: {:?}",
-                peer_addr, message
-            );
+        Ok(other) => {
+            // 非握手消息也正常处理 (可能已握手)
+            if let Some(ref tx) = action_tx {
+                forward_to_daemon(tx, &other, &peer_addr);
+            }
+            handle_peer_messages(stream, peer_addr, connections, action_tx).await;
         }
         Err(e) => {
             error!("Failed to decode message from {}: {}", peer_addr, e);
+        }
+    }
+}
+
+/// 将网络消息转发给 Daemon
+fn forward_to_daemon(tx: &mpsc::UnboundedSender<SyncAction>, msg: &Message, peer_id: &str) {
+    match msg {
+        Message::FileIndex(index) => {
+            let _ = tx.send(SyncAction::RemoteIndex {
+                pair_id: index.pair_id.clone(),
+                peer_id: peer_id.to_string(),
+                index: index.clone(),
+            });
+            debug!("Forwarded FileIndex from {} to daemon", peer_id);
+        }
+        Message::FileRequest(req) => {
+            let _ = tx.send(SyncAction::RemoteFileRequest {
+                pair_id: req.pair_id.clone(),
+                peer_id: peer_id.to_string(),
+                files: req.files.clone(),
+            });
+            debug!("Forwarded FileRequest from {} to daemon", peer_id);
+        }
+        _ => {
+            // 其他消息类型暂不处理
         }
     }
 }
@@ -381,6 +414,7 @@ async fn handle_peer_messages(
     mut stream: TcpStream,
     peer_addr: String,
     _connections: Arc<RwLock<HashMap<String, PeerConnection>>>,
+    action_tx: Option<mpsc::UnboundedSender<SyncAction>>,
 ) {
     loop {
         let mut len_buf = [0u8; 4];
@@ -406,8 +440,9 @@ async fn handle_peer_messages(
         match Message::from_bytes(&msg_buf) {
             Ok(message) => {
                 debug!("Received message from {}: {:?}", peer_addr, message);
-                // 消息分发给上层处理
-                // TODO: 通过 channel 发送给同步引擎
+                if let Some(ref tx) = action_tx {
+                    forward_to_daemon(tx, &message, &peer_addr);
+                }
             }
             Err(e) => {
                 error!("Failed to decode message from {}: {}", peer_addr, e);

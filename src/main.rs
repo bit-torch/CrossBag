@@ -26,10 +26,10 @@
 
 use anyhow::Result;
 use clap::Parser;
-use crossbag::{cli, config, easytier, network, service, sync, watcher};
+use crossbag::{cli, config, daemon, easytier, network, service, sync, watcher};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 /// 查找配置文件路径
@@ -75,92 +75,83 @@ async fn handle_serve(_args: cli::ServeArgs, config_path: PathBuf) -> Result<()>
 
     let config = Arc::new(config);
 
-    // ========== 1. 启动 Easytier 子进程 ==========
+    // ========== 1. Easytier 子进程 ==========
     let easytier_mgr: Option<Arc<tokio::sync::Mutex<easytier::EasytierManager>>> =
         if config.easytier.auto_start {
             let mut mgr = easytier::EasytierManager::new(config.easytier.clone());
             match mgr.start().await {
-                Ok(()) => {
-                    info!("Easytier subprocess started successfully");
-                }
-                Err(e) => {
-                    warn!("Failed to start Easytier: {}. Continuing without Easytier.", e);
-                }
+                Ok(()) => info!("Easytier started"),
+                Err(e) => warn!("Easytier start failed: {}", e),
             }
             Some(Arc::new(tokio::sync::Mutex::new(mgr)))
         } else {
-            info!("Easytier auto-start disabled in config");
             None
         };
 
-    // ========== 2. 启动网络管理器 ==========
-    let network = network::NetworkManager::new(config.clone());
+    // ========== 2. 网络 (先创建，后与 Daemon 绑定) ==========
+    let mut network = network::NetworkManager::new(config.clone());
     network.start().await?;
 
-    // ========== 3. 启动文件监控 ==========
+    // ========== 3. 同步守护进程 ==========
+    let daemon = daemon::SyncDaemon::new(config.clone());
+    let action_tx = daemon.action_sender();
+
+    // 将 Daemon 的消息通道注入 Network (入站消息 → Daemon)
+    network.set_action_sender(action_tx.clone());
+
+    // 启动事件循环
+    tokio::spawn(daemon.run());
+
+    // 启动文件监控 → 注入到 daemon
     let mut watcher = watcher::FileWatcher::new(500);
+    let pair_ids: Vec<String> = config
+        .sync_pairs
+        .iter()
+        .filter(|p| p.watch && p.enabled)
+        .map(|p| p.id.clone())
+        .collect();
+
     for pair in &config.sync_pairs {
         if pair.watch && pair.enabled {
             watcher.watch_path(&pair.local_path)?;
         }
     }
-    let _watcher_handle = watcher.spawn();
 
-    // ========== 4. 启动同步引擎 ==========
-    let _engine = sync::SyncEngine::new(config.clone());
+    if !pair_ids.is_empty() {
+        daemon::spawn_watcher_bridge(watcher, pair_ids.clone(), action_tx.clone(), 500);
+    } else {
+        let _ = watcher.spawn();
+    }
 
     // 定期全量同步
     for pair in &config.sync_pairs {
-        if pair.enabled {
-            tokio::spawn({
-                let pair = pair.clone();
-                let mut engine = sync::SyncEngine::new(config.clone());
-                let interval = pair.full_sync_interval;
-                async move {
-                    if interval > 0 {
-                        let mut ticker =
-                            tokio::time::interval(tokio::time::Duration::from_secs(interval));
-                        loop {
-                            ticker.tick().await;
-                            debug!("Running periodic full sync for pair '{}'", pair.id);
-                            match engine.full_sync(&pair).await {
-                                Ok(result) => {
-                                    info!(
-                                        "Full sync '{}': {} files, {} bytes, {} errors",
-                                        pair.id,
-                                        result.files_synced,
-                                        result.bytes_transferred,
-                                        result.errors.len()
-                                    );
-                                }
-                                Err(e) => {
-                                    error!("Full sync '{}' failed: {}", pair.id, e);
-                                }
-                            }
-                        }
-                    }
+        if pair.enabled && pair.full_sync_interval > 0 {
+            let tx = action_tx.clone();
+            let pair_id = pair.id.clone();
+            let interval = pair.full_sync_interval;
+            tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(tokio::time::Duration::from_secs(interval));
+                loop {
+                    ticker.tick().await;
+                    let _ = tx.send(daemon::SyncAction::PeriodicFullSync {
+                        pair_id: pair_id.clone(),
+                    });
                 }
             });
         }
     }
 
-    // ========== 5. 启动 Easytier 健康检查 ==========
+    // ========== 4. Easytier 健康检查 ==========
     if let Some(ref mgr) = easytier_mgr {
         let mgr = mgr.clone();
-        let health_interval = config.easytier.health_check_interval;
+        let interval = config.easytier.health_check_interval;
         tokio::spawn(async move {
-            let mut interval =
-                tokio::time::interval(tokio::time::Duration::from_secs(health_interval));
+            let mut ticker = tokio::time::interval(tokio::time::Duration::from_secs(interval));
             loop {
-                interval.tick().await;
-                let state = mgr.lock().await.health_check().await;
-                match state {
-                    easytier::EasytierState::Running => {}
-                    easytier::EasytierState::Crashed(msg) => {
-                        error!("Easytier crash detected: {}", msg);
-                    }
+                ticker.tick().await;
+                match mgr.lock().await.health_check().await {
                     easytier::EasytierState::Failed(msg) => {
-                        error!("Easytier permanently failed: {}", msg);
+                        error!("Easytier failed: {}", msg);
                         break;
                     }
                     _ => {}
@@ -169,25 +160,22 @@ async fn handle_serve(_args: cli::ServeArgs, config_path: PathBuf) -> Result<()>
         });
     }
 
-    info!("CrossBag daemon is running. Press Ctrl+C to stop.");
+    info!("CrossBag daemon running. Press Ctrl+C to stop.");
 
-    // ========== 6. 等待信号 ==========
+    // ========== 5. 等待退出 ==========
     tokio::signal::ctrl_c().await?;
     info!("Shutting down...");
 
-    // 关闭顺序: 反向清理
     network.stop().await;
 
     if let Some(mgr) = easytier_mgr {
-        let mut mgr = mgr.lock().await;
-        if let Err(e) = mgr.stop().await {
-            error!("Error stopping Easytier: {}", e);
-        } else {
-            info!("Easytier subprocess stopped");
+        match mgr.lock().await.stop().await {
+            Ok(()) => info!("Easytier stopped"),
+            Err(e) => error!("Easytier stop error: {}", e),
         }
     }
 
-    info!("CrossBag shutdown complete");
+    info!("Shutdown complete");
     Ok(())
 }
 
