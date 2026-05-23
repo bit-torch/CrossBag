@@ -14,7 +14,6 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio::time::{interval, timeout, Duration};
 use tracing::{debug, error, info, warn};
-use uuid::Uuid;
 
 /// 连接状态
 #[derive(Debug, Clone, PartialEq)]
@@ -31,7 +30,8 @@ pub struct PeerConnection {
     pub peer_name: String,
     pub address: String,
     pub state: ConnectionState,
-    stream: Option<TcpStream>,
+    /// 写通道 (向 peer 发送消息)
+    write_tx: Option<mpsc::Sender<Vec<u8>>>,
 }
 
 /// 网络管理器
@@ -77,7 +77,7 @@ impl NetworkManager {
                         peer_name: peer_config.name.clone(),
                         address: peer_config.address.clone(),
                         state: ConnectionState::Disconnected,
-                        stream: None,
+                        write_tx: None,
                     },
                 );
             }
@@ -130,6 +130,9 @@ impl NetworkManager {
         let connections = self.connections.clone();
         let peers = self.config.network.peers.clone();
         let connect_timeout = self.config.network.connect_timeout;
+        let node_config = self.config.clone();
+        let action_tx = self.action_tx.clone();
+        let running = self.running.clone();
 
         tokio::spawn(async move {
             loop {
@@ -148,9 +151,12 @@ impl NetworkManager {
                 };
 
                 for (peer_id, peer_config) in peers_to_connect {
-                    info!("Connecting to peer {} at {}", peer_id, peer_config.address);
+                    if !*running.lock().await {
+                        return;
+                    }
 
-                    // 更新状态为连接中
+                    info!("Connecting to peer '{}' at {}", peer_id, peer_config.address);
+
                     {
                         let mut conns = connections.write().await;
                         if let Some(conn) = conns.get_mut(&peer_id) {
@@ -158,47 +164,53 @@ impl NetworkManager {
                         }
                     }
 
-                    match timeout(
-                        Duration::from_secs(connect_timeout),
-                        TcpStream::connect(&peer_config.address),
-                    )
-                    .await
-                    {
-                        Ok(Ok(stream)) => {
-                            info!("Connected to peer {}", peer_id);
+                    let addr = peer_config.address.clone();
+                    match connect_and_handshake(&addr, connect_timeout, &node_config).await {
+                        Ok(stream) => {
+                            info!("Connected + handshake complete with '{}'", peer_id);
 
-                            // 发送握手
-                            let handshake = Message::Handshake(crate::protocol::Handshake {
-                                protocol_version: crate::protocol::PROTOCOL_VERSION,
-                                node_id: Uuid::new_v4(), // TODO: use actual node_id
-                                node_name: "crossbag-node".to_string(),
-                                hostname: hostname::get()
-                                    .map(|h| h.to_string_lossy().to_string())
-                                    .unwrap_or_default(),
+                            // Split stream: 读端给 reader，写端存入 connection map
+                            let (read_half, write_half) = tokio::io::split(stream);
+                            let (write_tx, write_rx) = mpsc::channel::<Vec<u8>>(256);
+
+                            {
+                                let mut conns = connections.write().await;
+                                if let Some(conn) = conns.get_mut(&peer_id) {
+                                    conn.state = ConnectionState::Connected;
+                                    conn.write_tx = Some(write_tx);
+                                }
+                            }
+
+                            // 写任务: 消费 write_rx 中的消息并写入 TCP
+                            let peer = peer_id.clone();
+                            let conns_w = connections.clone();
+                            tokio::spawn(async move {
+                                peer_writer(write_half, write_rx).await;
+                                let mut conns = conns_w.write().await;
+                                if let Some(conn) = conns.get_mut(&peer) {
+                                    conn.state = ConnectionState::Disconnected;
+                                    conn.write_tx = None;
+                                }
                             });
 
-                            let mut conns = connections.write().await;
-                            if let Some(conn) = conns.get_mut(&peer_id) {
-                                conn.state = ConnectionState::Connected;
-                                conn.stream = Some(stream);
-                            }
-
-                            // TODO: Send handshake
-                            let _ = handshake;
+                            // 读任务
+                            let conns_r = connections.clone();
+                            let peer_r = peer_id.clone();
+                            let tx = action_tx.clone();
+                            tokio::spawn(async move {
+                                peer_reader(read_half, &addr, tx).await;
+                                let mut conns = conns_r.write().await;
+                                if let Some(conn) = conns.get_mut(&peer_r) {
+                                    conn.state = ConnectionState::Disconnected;
+                                }
+                                warn!("Peer '{}' disconnected", peer_r);
+                            });
                         }
-                        Ok(Err(e)) => {
-                            warn!("Failed to connect to peer {}: {}", peer_id, e);
+                        Err(e) => {
+                            warn!("Failed to connect '{}': {}", peer_id, e);
                             let mut conns = connections.write().await;
                             if let Some(conn) = conns.get_mut(&peer_id) {
-                                conn.state =
-                                    ConnectionState::Failed(format!("Connection error: {}", e));
-                            }
-                        }
-                        Err(_) => {
-                            warn!("Connection to peer {} timed out", peer_id);
-                            let mut conns = connections.write().await;
-                            if let Some(conn) = conns.get_mut(&peer_id) {
-                                conn.state = ConnectionState::Failed("Connection timed out".into());
+                                conn.state = ConnectionState::Failed(e.to_string());
                             }
                         }
                     }
@@ -210,56 +222,30 @@ impl NetworkManager {
         });
     }
 
-    /// 启动心跳
+    /// 启动心跳日志 (每周期报告连接状态)
     async fn start_heartbeat(&self) {
         let connections = self.connections.clone();
         let interval_secs = self.config.network.heartbeat_interval;
-        let node_id = self.config.node.node_id;
 
         tokio::spawn(async move {
             let mut ticker = interval(Duration::from_secs(interval_secs));
             loop {
                 ticker.tick().await;
-
-                let heartbeat = Message::Heartbeat(crate::protocol::Heartbeat {
-                    node_id,
-                    timestamp: chrono::Utc::now(),
-                });
-
-                let heartbeat_bytes = match heartbeat.to_bytes() {
-                    Ok(b) => b,
-                    Err(e) => {
-                        error!("Failed to serialize heartbeat: {}", e);
-                        continue;
-                    }
-                };
-
-                // 获取需要发送心跳的 peer 列表
-                let connected_peers: Vec<String> = {
-                    let conns = connections.read().await;
-                    conns
-                        .iter()
-                        .filter(|(_, c)| c.state == ConnectionState::Connected)
-                        .map(|(id, _)| id.clone())
-                        .collect()
-                };
-
-                // 对每个已连接 peer 发送心跳 (需要写锁来访问 stream)
-                for peer_id in connected_peers {
-                    let mut conns = connections.write().await;
-                    if let Some(conn) = conns.get_mut(&peer_id) {
-                        if let Some(ref mut stream) = conn.stream {
-                            let len = heartbeat_bytes.len() as u32;
-                            let mut framed = Vec::with_capacity(4 + heartbeat_bytes.len());
-                            framed.extend_from_slice(&len.to_be_bytes());
-                            framed.extend_from_slice(&heartbeat_bytes);
-                            if let Err(e) = stream.write_all(&framed).await {
-                                warn!("Failed to send heartbeat to {}: {}", peer_id, e);
-                                conn.state =
-                                    ConnectionState::Failed(format!("Heartbeat failed: {}", e));
-                            }
-                        }
-                    }
+                let conns = connections.read().await;
+                let connected: Vec<&str> = conns
+                    .iter()
+                    .filter(|(_, c)| c.state == ConnectionState::Connected)
+                    .map(|(id, _)| id.as_str())
+                    .collect();
+                let total = conns.len();
+                debug!(
+                    "Network state: {}/{} peers connected{}",
+                    connected.len(),
+                    total,
+                    if connected.is_empty() { "" } else { ": " }
+                );
+                for peer in &connected {
+                    debug!("  ✓ {}", peer);
                 }
             }
         });
@@ -269,19 +255,17 @@ impl NetworkManager {
     pub async fn send_to_peer(&self, peer_id: &str, message: &Message) -> Result<()> {
         let data = message.to_bytes().context("Failed to serialize message")?;
 
-        // 前缀长度 (4 bytes)
         let len = data.len() as u32;
         let mut framed = Vec::with_capacity(4 + data.len());
         framed.extend_from_slice(&len.to_be_bytes());
         framed.extend_from_slice(&data);
 
-        let mut conns = self.connections.write().await;
-        if let Some(conn) = conns.get_mut(peer_id) {
-            if let Some(ref mut stream) = conn.stream {
-                stream
-                    .write_all(&framed)
+        let conns = self.connections.read().await;
+        if let Some(conn) = conns.get(peer_id) {
+            if let Some(ref tx) = conn.write_tx {
+                tx.send(framed)
                     .await
-                    .context("Failed to send message")?;
+                    .map_err(|_| anyhow::anyhow!("Write channel closed for peer {}", peer_id))?;
                 return Ok(());
             }
         }
@@ -301,11 +285,10 @@ impl NetworkManager {
     /// 停止网络服务
     pub async fn stop(&self) {
         *self.running.lock().await = false;
-        // 关闭所有连接
         let mut conns = self.connections.write().await;
         for (_, conn) in conns.iter_mut() {
             conn.state = ConnectionState::Disconnected;
-            conn.stream = None;
+            conn.write_tx = None; // 关闭写通道
         }
         info!("Network manager stopped");
     }
@@ -314,8 +297,8 @@ impl NetworkManager {
 /// 处理传入连接
 async fn handle_incoming_connection(
     mut stream: TcpStream,
-    connections: Arc<RwLock<HashMap<String, PeerConnection>>>,
-    _config: Arc<CrossBagConfig>,
+    _connections: Arc<RwLock<HashMap<String, PeerConnection>>>,
+    config: Arc<CrossBagConfig>,
     action_tx: Option<mpsc::UnboundedSender<SyncAction>>,
 ) {
     let peer_addr = stream
@@ -323,39 +306,38 @@ async fn handle_incoming_connection(
         .map(|a| a.to_string())
         .unwrap_or_else(|_| "unknown".to_string());
 
-    info!("Handling connection from {}", peer_addr);
+    info!("Connection from {}", peer_addr);
 
-    // 读取消息长度前缀
     let mut len_buf = [0u8; 4];
-    if let Err(e) = stream.read_exact(&mut len_buf).await {
-        error!("Failed to read message length from {}: {}", peer_addr, e);
+    if stream.read_exact(&mut len_buf).await.is_err() {
         return;
     }
 
     let msg_len = u32::from_be_bytes(len_buf) as usize;
     if msg_len > 100 * 1024 * 1024 {
-        error!("Message too large from {}: {} bytes", peer_addr, msg_len);
+        error!("Message too large from {}: {}", peer_addr, msg_len);
         return;
     }
 
     let mut msg_buf = vec![0u8; msg_len];
-    if let Err(e) = stream.read_exact(&mut msg_buf).await {
-        error!("Failed to read message from {}: {}", peer_addr, e);
+    if stream.read_exact(&mut msg_buf).await.is_err() {
         return;
     }
 
     match Message::from_bytes(&msg_buf) {
         Ok(Message::Handshake(handshake)) => {
             info!(
-                "Received handshake from node {} ({})",
-                handshake.node_name, handshake.node_id
+                "Handshake from {} ({}) protocol v{}",
+                handshake.hostname, handshake.node_name, handshake.protocol_version
             );
 
+            // 检查协议版本
+            let accepted = handshake.protocol_version == crate::protocol::PROTOCOL_VERSION;
             let ack = Message::HandshakeAck(crate::protocol::HandshakeAck {
-                accepted: true,
-                node_id: Uuid::new_v4(),
-                node_name: "crossbag-node".to_string(),
-                message: None,
+                accepted,
+                node_id: config.node.node_id,
+                node_name: config.node.name.clone(),
+                message: if accepted { None } else { Some("Protocol version mismatch".into()) },
             });
 
             if let Ok(ack_bytes) = ack.to_bytes() {
@@ -366,17 +348,56 @@ async fn handle_incoming_connection(
                 let _ = stream.write_all(&framed).await;
             }
 
-            handle_peer_messages(stream, peer_addr, connections, action_tx).await;
+            if accepted {
+                // 入站连接读取循环
+                loop {
+                    let mut len_buf = [0u8; 4];
+                    if stream.read_exact(&mut len_buf).await.is_err() {
+                        break;
+                    }
+                    let msg_len = u32::from_be_bytes(len_buf) as usize;
+                    if msg_len > 100 * 1024 * 1024 {
+                        break;
+                    }
+                    let mut msg_buf = vec![0u8; msg_len];
+                    if stream.read_exact(&mut msg_buf).await.is_err() {
+                        break;
+                    }
+                    if let Ok(message) = Message::from_bytes(&msg_buf) {
+                        if let Some(ref tx) = action_tx {
+                            forward_to_daemon(tx, &message, &peer_addr);
+                        }
+                    }
+                }
+            }
         }
         Ok(other) => {
-            // 非握手消息也正常处理 (可能已握手)
             if let Some(ref tx) = action_tx {
                 forward_to_daemon(tx, &other, &peer_addr);
             }
-            handle_peer_messages(stream, peer_addr, connections, action_tx).await;
+            // 继续读取后续消息
+            loop {
+                let mut len_buf = [0u8; 4];
+                if stream.read_exact(&mut len_buf).await.is_err() {
+                    break;
+                }
+                let msg_len = u32::from_be_bytes(len_buf) as usize;
+                if msg_len > 100 * 1024 * 1024 {
+                    break;
+                }
+                let mut msg_buf = vec![0u8; msg_len];
+                if stream.read_exact(&mut msg_buf).await.is_err() {
+                    break;
+                }
+                if let Ok(message) = Message::from_bytes(&msg_buf) {
+                    if let Some(ref tx) = action_tx {
+                        forward_to_daemon(tx, &message, &peer_addr);
+                    }
+                }
+            }
         }
         Err(e) => {
-            error!("Failed to decode message from {}: {}", peer_addr, e);
+            error!("Failed to decode from {}: {}", peer_addr, e);
         }
     }
 }
@@ -406,21 +427,88 @@ fn forward_to_daemon(tx: &mpsc::UnboundedSender<SyncAction>, msg: &Message, peer
     }
 }
 
-/// 处理对等节点消息循环
-async fn handle_peer_messages(
-    mut stream: TcpStream,
-    peer_addr: String,
-    _connections: Arc<RwLock<HashMap<String, PeerConnection>>>,
+/// TCP 连接 + 发送握手 + 等待 HandshakeAck
+async fn connect_and_handshake(
+    addr: &str,
+    connect_timeout: u64,
+    config: &CrossBagConfig,
+) -> Result<TcpStream> {
+    let stream = timeout(
+        Duration::from_secs(connect_timeout),
+        TcpStream::connect(addr),
+    )
+    .await
+    .context("Connection timed out")?
+    .with_context(|| format!("Failed to connect to {}", addr))?;
+
+    // 构建握手消息
+    let handshake = Message::Handshake(crate::protocol::Handshake {
+        protocol_version: crate::protocol::PROTOCOL_VERSION,
+        node_id: config.node.node_id,
+        node_name: config.node.name.clone(),
+        hostname: hostname::get()
+            .map(|h| h.to_string_lossy().to_string())
+            .unwrap_or_default(),
+    });
+
+    // 发送握手帧 (4字节长度前缀 + 消息体)
+    let payload = handshake.to_bytes().context("Failed to serialize handshake")?;
+    let len = payload.len() as u32;
+    let (mut reader, mut writer) = stream.into_split();
+
+    let mut framed = Vec::with_capacity(4 + payload.len());
+    framed.extend_from_slice(&len.to_be_bytes());
+    framed.extend_from_slice(&payload);
+    writer
+        .write_all(&framed)
+        .await
+        .context("Failed to send handshake")?;
+
+    // 读取 HandshakeAck
+    let mut len_buf = [0u8; 4];
+    reader
+        .read_exact(&mut len_buf)
+        .await
+        .context("Failed to read handshake ack length")?;
+
+    let ack_len = u32::from_be_bytes(len_buf) as usize;
+    if ack_len > 10 * 1024 * 1024 {
+        anyhow::bail!("Handshake ack too large: {} bytes", ack_len);
+    }
+    let mut ack_buf = vec![0u8; ack_len];
+    reader
+        .read_exact(&mut ack_buf)
+        .await
+        .context("Failed to read handshake ack body")?;
+
+    let ack = Message::from_bytes(&ack_buf).context("Failed to decode handshake ack")?;
+    match ack {
+        Message::HandshakeAck(h) if h.accepted => {
+            info!("Handshake accepted by peer at {}", addr);
+        }
+        Message::HandshakeAck(h) => {
+            anyhow::bail!("Handshake rejected: {:?}", h.message);
+        }
+        other => {
+            anyhow::bail!("Expected HandshakeAck, got {:?}", std::mem::discriminant(&other));
+        }
+    }
+
+    // 将 split 的读写端重新合并为 stream
+    let stream = writer.reunite(reader).map_err(|_| anyhow::anyhow!("Failed to reunite stream"))?;
+    Ok(stream)
+}
+
+/// 从 stream 读取端持续读取消息
+async fn peer_reader(
+    mut reader: tokio::io::ReadHalf<TcpStream>,
+    peer_addr: &str,
     action_tx: Option<mpsc::UnboundedSender<SyncAction>>,
 ) {
     loop {
         let mut len_buf = [0u8; 4];
-        match stream.read_exact(&mut len_buf).await {
-            Ok(_) => {}
-            Err(e) => {
-                debug!("Connection closed from {}: {}", peer_addr, e);
-                break;
-            }
+        if reader.read_exact(&mut len_buf).await.is_err() {
+            break;
         }
 
         let msg_len = u32::from_be_bytes(len_buf) as usize;
@@ -430,20 +518,33 @@ async fn handle_peer_messages(
         }
 
         let mut msg_buf = vec![0u8; msg_len];
-        if stream.read_exact(&mut msg_buf).await.is_err() {
+        if reader.read_exact(&mut msg_buf).await.is_err() {
             break;
         }
 
         match Message::from_bytes(&msg_buf) {
             Ok(message) => {
-                debug!("Received message from {}: {:?}", peer_addr, message);
+                debug!("Received from {}: {:?}", peer_addr, std::mem::discriminant(&message));
                 if let Some(ref tx) = action_tx {
-                    forward_to_daemon(tx, &message, &peer_addr);
+                    forward_to_daemon(tx, &message, peer_addr);
                 }
             }
             Err(e) => {
-                error!("Failed to decode message from {}: {}", peer_addr, e);
+                error!("Failed to decode from {}: {}", peer_addr, e);
             }
         }
     }
 }
+
+/// 从写通道消费消息并写入 TCP
+async fn peer_writer(
+    mut writer: tokio::io::WriteHalf<TcpStream>,
+    mut rx: mpsc::Receiver<Vec<u8>>,
+) {
+    while let Some(data) = rx.recv().await {
+        if writer.write_all(&data).await.is_err() {
+            break;
+        }
+    }
+}
+
