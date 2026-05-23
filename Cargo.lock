@@ -251,6 +251,7 @@ dependencies = [
  "clap",
  "glob",
  "hostname",
+ "libc",
  "notify",
  "serde",
  "serde_json",

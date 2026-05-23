@@ -299,9 +299,9 @@ impl EasytierManager {
             // 先尝试优雅关闭
             #[cfg(unix)]
             {
-                use tokio::signal::unix::{kill, SignalKind};
+                use tokio::signal::unix::SignalKind;
                 let pid = child.id().unwrap_or(0) as i32;
-                let _ = kill(pid, SignalKind::terminate());
+                unsafe { libc::kill(pid, SignalKind::terminate().as_raw_value()); }
             }
 
             #[cfg(windows)]
