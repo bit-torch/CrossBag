@@ -113,7 +113,7 @@ impl SyncState {
                 let file_name = path.file_name().and_then(|n| n.to_str());
                 for pattern in exclude_patterns {
                     if let Ok(glob) = glob::Pattern::new(pattern) {
-                        if glob.matches_path(path) || file_name.map_or(false, |n| glob.matches(n)) {
+                        if glob.matches_path(path) || file_name.is_some_and(|n| glob.matches(n)) {
                             return false;
                         }
                     }

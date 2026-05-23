@@ -121,7 +121,7 @@ impl SyncEngine {
                         0,
                     )
                 })
-                .unwrap_or_else(|| Utc::now());
+                .unwrap_or_else(Utc::now);
 
             let is_dir = metadata.is_dir();
 
@@ -294,9 +294,10 @@ impl SyncEngine {
 }
 
 /// 冲突解决策略
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum ConflictStrategy {
     /// 保留较新的版本
+    #[default]
     NewerWins,
     /// 保留本地版本
     LocalWins,
@@ -304,12 +305,6 @@ pub enum ConflictStrategy {
     RemoteWins,
     /// 创建备份
     CreateBackup,
-}
-
-impl Default for ConflictStrategy {
-    fn default() -> Self {
-        ConflictStrategy::NewerWins
-    }
 }
 
 #[cfg(test)]

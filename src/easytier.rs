@@ -113,26 +113,23 @@ impl EasytierManager {
 
     /// 构建 Easytier 命令行参数
     fn build_args(&self, _binary: &str) -> Vec<String> {
-        let mut args = Vec::new();
-
-        args.push("--instance-name".to_string());
-        args.push(self.config.instance_name.clone());
-
-        args.push("--network-name".to_string());
-        args.push(self.config.network_name.clone());
+        let mut args = vec![
+            "--instance-name".to_string(),
+            self.config.instance_name.clone(),
+            "--network-name".to_string(),
+            self.config.network_name.clone(),
+        ];
 
         if !self.config.network_secret.is_empty() {
             args.push("--network-secret".to_string());
             args.push(self.config.network_secret.clone());
         }
 
-        // 添加监听地址
         if !self.config.listeners.is_empty() {
             args.push("--listeners".to_string());
             args.push(self.config.listeners.join(" "));
         }
 
-        // 禁用 DHCP (我们手动管理 IP)
         args.push("--disable-dhcp".to_string());
 
         args

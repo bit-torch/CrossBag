@@ -171,9 +171,10 @@ pub struct SyncPair {
 }
 
 /// 同步方向
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub enum SyncDirection {
     /// 双向同步
+    #[default]
     Bidirectional,
     /// 仅从本地推送到远程
     PushOnly,
@@ -252,12 +253,6 @@ fn hostname() -> Result<String> {
         .context("Failed to get hostname")?
         .to_string_lossy()
         .to_string())
-}
-
-impl Default for SyncDirection {
-    fn default() -> Self {
-        SyncDirection::Bidirectional
-    }
 }
 
 impl Default for AdvancedConfig {
