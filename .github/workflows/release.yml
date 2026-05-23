@@ -93,4 +93,4 @@ jobs:
             artifacts/crossbag-windows-x86_64.exe/crossbag.exe
             artifacts/crossbag-windows-x86_64.exe/crossbag-windows-x86_64.exe.sha256
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
